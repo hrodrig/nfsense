@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
@@ -64,4 +65,94 @@ func draftFixture(t *testing.T, extraKeys bool) []byte {
 	}
 	return []byte(`{"format":"nfsense.draft","format_version":1,"body":{"name":"lab"},` +
 		`"x-notes":"kept verbatim","ui":{"theme":"dark"}}`)
+}
+
+// TestDraftRoundTripPreservesBytes is D-10 made executable: the stored
+// document must be the exact bytes handed to SaveDraft. The fixture is hostile
+// to any re-serialization — `format_version` comes before `format`, `ui` sits
+// after `body`, both are keys the store does not model, and the body holds
+// multi-byte UTF-8 long enough that the byte count exceeds the rune count
+// (S10: the limit is bytes on both sides).
+func TestDraftRoundTripPreservesBytes(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	raw := []byte(`{"format_version":1,"format":"nfsense.draft",` +
+		`"body":{"zulu":"→ 日本","alpha":["é","naïve"],"note":"multi-byte ✓"},` +
+		`"ui":{"theme":"dark"},"x-notes":"kept verbatim"}`)
+
+	runes, bytelen := len([]rune(string(raw))), len(raw)
+	if runes >= bytelen {
+		t.Fatalf("fixture is not multi-byte: %d runes vs %d bytes", runes, bytelen)
+	}
+
+	rev, err := s.SaveDraft(ctx, "local:test", raw, 0)
+	if err != nil {
+		t.Fatalf("save draft: %v", err)
+	}
+	if rev != 1 {
+		t.Fatalf("saved revision = %d, want 1", rev)
+	}
+
+	got, err := s.GetDraft(ctx)
+	if err != nil {
+		t.Fatalf("get draft: %v", err)
+	}
+	if got.Revision != 1 {
+		t.Fatalf("read revision = %d, want 1", got.Revision)
+	}
+	if !bytes.Equal(got.Document, raw) {
+		t.Fatalf("stored document is not byte-identical to what was written\n got (%d bytes) %q\nwant (%d bytes) %q",
+			len(got.Document), got.Document, len(raw), raw)
+	}
+
+	// The columns, read directly: `backend` is the backend constant and
+	// `format_version` the envelope's — the envelope's `format` ("nfsense.draft")
+	// never reaches a column (D-10).
+	assertFormatColumns(t, s, BackendNft, 1)
+}
+
+// TestSaveDraftUpdatesFormatColumns proves W7: backend and format_version are
+// written on every save rather than left as whatever the previous writer left
+// behind. Both columns are corrupted behind the CHECK constraints' back, and a
+// single save must put them back.
+func TestSaveDraftUpdatesFormatColumns(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.SaveDraft(ctx, "local:test", draftFixture(t, false), 0); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	assertFormatColumns(t, s, BackendNft, 1)
+
+	// 'pf' is not a value the schema accepts, so the corruption has to happen
+	// with constraint checking disabled; 99 is legal SQL but a version this
+	// binary would never write. The pragma is per connection, and the pool is
+	// capped at one connection, so both the corruption and the save below see
+	// it — which is exactly why the pragma is switched back off immediately.
+	if _, err := s.db.ExecContext(ctx, `PRAGMA ignore_check_constraints = ON`); err != nil {
+		t.Fatalf("enable ignore_check_constraints: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = s.db.ExecContext(context.Background(), `PRAGMA ignore_check_constraints = OFF`)
+	})
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE working_draft SET backend = 'pf', format_version = 99 WHERE id = 1`); err != nil {
+		t.Fatalf("corrupt format columns: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA ignore_check_constraints = OFF`); err != nil {
+		t.Fatalf("disable ignore_check_constraints: %v", err)
+	}
+	assertFormatColumns(t, s, "pf", 99)
+
+	// The corruption did not touch the revision, so a save expecting 1 is a
+	// legitimate write, not a conflict.
+	rev, err := s.SaveDraft(ctx, "local:test", draftFixture(t, true), 1)
+	if err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+	if rev != 2 {
+		t.Fatalf("second save revision = %d, want 2", rev)
+	}
+	assertFormatColumns(t, s, BackendNft, 1)
 }

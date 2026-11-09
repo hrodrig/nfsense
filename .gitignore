@@ -1,0 +1,44 @@
+# Deny-all by default. Nothing ships unless it is whitelisted below.
+# There is no exception list further down: a rule that re-excludes something
+# already outside the whitelist is noise pretending to be policy.
+*
+.*
+
+# Repository metadata & root config
+!.gitignore
+!.gitattributes
+!LICENSE
+!README.md
+
+# Go module and sources
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!migrations/
+!migrations/**
+
+# Tooling and CI
+!Makefile
+!GNUmakefile
+!.golangci.yml
+!.golangci.yaml
+!.goreleaser.yaml
+!.github/
+!.github/**
+
+# Documentation: markdown at the top level, and assets named file by file so a
+# 2 MB design master sitting next to the derivatives cannot become tracked just
+# because it lives inside a whitelisted directory.
+!docs/
+!docs/*.md
+!docs/assets/
+!docs/assets/hero.jpg
+!docs/assets/mark.jpg
+!docs/assets/social-preview.jpg
+
+# Test fixtures
+!testdata/
+!testdata/**
